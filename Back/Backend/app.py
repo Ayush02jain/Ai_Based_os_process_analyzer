@@ -3,6 +3,7 @@ from flask_cors import CORS
 import psutil
 import joblib
 import os
+import shutil
 from processes_page import live_processes
 
 # Initialize Flask app with custom static and template folders
@@ -71,7 +72,8 @@ def get_system_metrics():
     try:
         cpu_usage = psutil.cpu_percent(interval=1)
         memory_usage = psutil.virtual_memory().percent
-        disk_usage = psutil.disk_usage('/').percent
+        disk_total, disk_used, disk_free = shutil.disk_usage('C:' if os.name == 'nt' else '/')
+        disk_usage = round(disk_used / disk_total * 100, 1)
 
         scaled_data = scaler.transform([[cpu_usage, memory_usage]])
         prediction = model.predict(scaled_data)
