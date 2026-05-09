@@ -1,179 +1,226 @@
+"""
+KronOS ML Pipeline — RandomForestClassifier for OS Process Anomaly Detection.
+
+Switched from IsolationForest (unsupervised, contamination mismatch) to
+RandomForestClassifier (supervised) because we have labeled synthetic data.
+Now uses 4 features: cpu_percent, memory_percent, disk_percent, process_count.
+Outputs class label + confidence/probability score.
+"""
+
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.ensemble import IsolationForest
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 import joblib
 import os
+from typing import Tuple, Optional
 
-# Step 1: Load the Dataset
-def load_data(file_path):
+
+# ---------------------------------------------------------------------------
+# Step 1 — Generate a synthetic 4-feature dataset with realistic distributions
+# ---------------------------------------------------------------------------
+def generate_dataset(num_rows: int = 5000, anomaly_ratio: float = 0.3) -> pd.DataFrame:
     """
-    Load dataset from a CSV file.
+    Build a synthetic dataset that mimics real OS metrics.
+    Normal rows have moderate resource usage; anomalies have spikes in
+    one or more of cpu/memory/disk or abnormal process counts.
+    anomaly_ratio is kept at 0.3 (30%) — enough for the model to learn
+    the anomaly boundary without drowning normal samples.
     """
-    try:
-        df = pd.read_csv(file_path)
-        print("Dataset loaded successfully.")
-        return df
-    except Exception as e:
-        print(f"Error loading dataset: {e}")
-        return None
+    np.random.seed(42)
 
+    num_normal = int(num_rows * (1 - anomaly_ratio))
+    num_anomaly = num_rows - num_normal
 
-# Step 2: Preprocess the Data
-def preprocess_data(df):
-    """
-    Preprocess the dataset by handling missing values, normalizing features, and encoding labels.
-    """
-    print("Preprocessing data...")
+    # --- Normal data ---
+    normal = pd.DataFrame({
+        "cpu_percent": np.random.uniform(5, 60, num_normal),
+        "memory_percent": np.random.uniform(20, 65, num_normal),
+        "disk_percent": np.random.uniform(30, 75, num_normal),
+        "process_count": np.random.randint(80, 250, num_normal),
+        "label": 1,  # 1 = Normal
+    })
 
-    # Drop non-numeric columns that are irrelevant for anomaly detection
-    non_numeric_columns = df.select_dtypes(exclude=['number']).columns
-    print(f"Dropping non-numeric columns: {list(non_numeric_columns)}")
-    df.drop(columns=non_numeric_columns, inplace=True)
+    # --- Anomaly data (4 different anomaly types, mixed) ---
+    anomaly = pd.DataFrame({
+        "cpu_percent": np.random.uniform(75, 100, num_anomaly),
+        "memory_percent": np.random.uniform(70, 100, num_anomaly),
+        "disk_percent": np.random.uniform(85, 100, num_anomaly),
+        "process_count": np.random.randint(300, 600, num_anomaly),
+        "label": 0,  # 0 = Anomaly
+    })
 
-    # Convert relevant columns to numeric
-    for col in ['CPU_Usage', 'Memory_Usage']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')  # Convert to numeric, coerce errors to NaN
+    # Add some variety: not ALL anomalies spike on every metric
+    quarter = num_anomaly // 4
 
-    # Handle missing values
-    print("Handling missing values...")
-    df.fillna(df.mean(numeric_only=True), inplace=True)  # Use mean for numeric columns only
+    # Type A — CPU-only spike (memory/disk stay normal-ish)
+    anomaly.iloc[:quarter, 1] = np.random.uniform(25, 55, quarter)     # memory normal
+    anomaly.iloc[:quarter, 2] = np.random.uniform(35, 70, quarter)     # disk normal
 
-    # Normalize features
-    scaler = MinMaxScaler()
-    numeric_columns = df.select_dtypes(include=['number']).columns
-    df[numeric_columns] = scaler.fit_transform(df[numeric_columns])
+    # Type B — Memory-only spike
+    anomaly.iloc[quarter:2*quarter, 0] = np.random.uniform(10, 50, quarter)  # cpu normal
+    anomaly.iloc[quarter:2*quarter, 2] = np.random.uniform(35, 70, quarter)  # disk normal
 
-    # Create synthetic process states (if applicable)
-    if 'process_state' in df.columns:
-        df['process_state'] = df['process_state'].apply(lambda x: 1 if x == 'Running' else 0)
+    # Type C — Disk-only spike
+    anomaly.iloc[2*quarter:3*quarter, 0] = np.random.uniform(10, 50, quarter)  # cpu normal
+    anomaly.iloc[2*quarter:3*quarter, 1] = np.random.uniform(25, 55, quarter)  # memory normal
 
-    # Create a synthetic label column for anomalies
-    print("Creating synthetic label column...")
-    df['label'] = df.apply(
-        lambda row: -1 if (
-            row['CPU_Usage'] > 0.9 or
-            row['Memory_Usage'] > 0.9 or
-            'process_state_Zombie' in row or
-            'process_state_Orphan' in row
-        ) else 1,
-        axis=1
-    )
+    # Type D — Process-count spike (all metrics can be moderate)
+    anomaly.iloc[3*quarter:, 0] = np.random.uniform(30, 70, num_anomaly - 3*quarter)
+    anomaly.iloc[3*quarter:, 1] = np.random.uniform(40, 70, num_anomaly - 3*quarter)
+    anomaly.iloc[3*quarter:, 2] = np.random.uniform(50, 80, num_anomaly - 3*quarter)
 
-    print("Data preprocessing completed.")
-    return df, scaler
-
-
-# Step 3: Split the Data into Training and Testing Sets
-def split_data(df):
-    """
-    Split the dataset into training and testing sets.
-    """
-    X = df.drop(columns=['label'])
-    y = df['label']
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
-    print("Data split into training and testing sets.")
-    return X_train, X_test, y_train, y_test
-
-
-# Step 4: Train the Model
-def train_model(X_train):
-    """
-    Train an anomaly detection model using Isolation Forest.
-    """
-    print("Training model...")
-    model = IsolationForest(contamination=0.1, random_state=42)  # Adjust contamination for anomalies
-    model.fit(X_train)
-    print("Model training completed.")
-    return model
-
-
-# Step 5: Evaluate the Model
-def evaluate_model(model, X_test, y_test):
-    """
-    Evaluate the model's performance using metrics like precision, recall, and F1-score.
-    """
-    y_pred = model.predict(X_test)
-    y_pred = [1 if x == 1 else -1 for x in y_pred]  # Convert predictions to binary labels
-
-    print("Confusion Matrix:")
-    print(confusion_matrix(y_test, y_pred))
-
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred, zero_division=0))
-
-
-# Step 6: Save the Model
-def save_model(model, scaler, model_path, scaler_path):
-    """
-    Save the trained model and scaler for future use.
-    """
-    # Ensure the directory exists
-    os.makedirs(os.path.dirname(model_path), exist_ok=True)
-
-    # Save the model and scaler
-    joblib.dump(model, model_path)
-    joblib.dump(scaler, scaler_path)
-    print(f"Model saved to {model_path} and scaler saved to {scaler_path}.")
-
-
-# Step 7: Inject Synthetic Anomalies
-def inject_anomalies(df):
-    """
-    Inject synthetic anomalies into the dataset for testing purposes.
-    """
-    print("Injecting synthetic anomalies...")
-
-    # High CPU usage anomalies
-    anomaly_indices = np.random.choice(df.index, size=50, replace=False)  # Simulate 50 anomalies
-    df.loc[anomaly_indices, 'CPU_Usage'] = np.random.uniform(0.9, 1.5, size=len(anomaly_indices))  # Simulate spikes
-
-    # High memory usage anomalies
-    memory_anomaly_indices = np.random.choice(df.index, size=30, replace=False)
-    df.loc[memory_anomaly_indices, 'Memory_Usage'] = np.random.uniform(0.9, 1.5, size=len(memory_anomaly_indices))
-
-    # Zombie and Orphan process anomalies
-    zombie_indices = np.random.choice(df.index, size=20, replace=False)
-    df.loc[zombie_indices, 'process_state_Zombie'] = 1
-    df.loc[zombie_indices, 'process_state_Running'] = 0
-
-    orphan_indices = np.random.choice(df.index, size=20, replace=False)
-    df.loc[orphan_indices, 'process_state_Orphan'] = 1
-    df.loc[orphan_indices, 'process_state_Running'] = 0
-
-    print("Synthetic anomalies injected.")
+    df = pd.concat([normal, anomaly], ignore_index=True).sample(frac=1, random_state=42).reset_index(drop=True)
+    print(f"Dataset generated: {len(df)} rows — {num_normal} normal, {num_anomaly} anomaly")
     return df
 
 
-# Main Function
+# ---------------------------------------------------------------------------
+# Step 2 — Preprocess: scale features with MinMaxScaler
+# ---------------------------------------------------------------------------
+def preprocess_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, MinMaxScaler]:
+    """
+    Separate features/labels and apply MinMaxScaler.
+    Returns scaled feature DataFrame, label Series, and the fitted scaler.
+    """
+    feature_cols = ["cpu_percent", "memory_percent", "disk_percent", "process_count"]
+    X = df[feature_cols].copy()
+    y = df["label"].copy()
+
+    scaler = MinMaxScaler()
+    X[feature_cols] = scaler.fit_transform(X[feature_cols])
+
+    print(f"Preprocessing complete — {len(feature_cols)} features scaled to [0, 1]")
+    return X, y, scaler
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — Train/test split (stratified to preserve class balance)
+# ---------------------------------------------------------------------------
+def split_data(X: pd.DataFrame, y: pd.Series, test_size: float = 0.2) -> tuple:
+    """
+    80/20 stratified split so both train and test have the same
+    normal/anomaly ratio.
+    """
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, stratify=y, random_state=42
+    )
+    print(f"Split: train={len(X_train)}, test={len(X_test)}")
+    return X_train, X_test, y_train, y_test
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — Train a RandomForestClassifier
+# ---------------------------------------------------------------------------
+def train_model(X_train: pd.DataFrame, y_train: pd.Series) -> RandomForestClassifier:
+    """
+    Supervised RandomForest with 200 trees.
+    Using class_weight='balanced' to handle any residual class imbalance.
+    This replaces the old IsolationForest which had a contamination
+    parameter (0.1) that contradicted the 90% anomaly training data.
+    """
+    model = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=15,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(X_train, y_train)
+    print("RandomForestClassifier training completed.")
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Step 5 — Evaluate and print metrics
+# ---------------------------------------------------------------------------
+def evaluate_model(model: RandomForestClassifier, X_test: pd.DataFrame, y_test: pd.Series) -> None:
+    """
+    Print accuracy, confusion matrix, and per-class precision/recall/F1.
+    """
+    y_pred = model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+
+    print(f"\nAccuracy: {acc:.4f}")
+    print("\nConfusion Matrix:")
+    print(confusion_matrix(y_test, y_pred))
+    print("\nClassification Report:")
+    print(classification_report(
+        y_test, y_pred,
+        target_names=["Anomaly (0)", "Normal (1)"],
+        zero_division=0,
+    ))
+
+
+# ---------------------------------------------------------------------------
+# Step 6 — Demonstrate predict_with_confidence (used by app.py at runtime)
+# ---------------------------------------------------------------------------
+def predict_with_confidence(
+    model: RandomForestClassifier,
+    scaler: MinMaxScaler,
+    cpu: float,
+    memory: float,
+    disk: float,
+    process_count: int,
+) -> dict:
+    """
+    Single-sample prediction helper.
+    Returns {'status': 'Normal'|'Anomaly', 'confidence': 0.0–1.0}.
+    """
+    features = np.array([[cpu, memory, disk, process_count]])
+    scaled = scaler.transform(features)
+    prediction = model.predict(scaled)[0]
+    probabilities = model.predict_proba(scaled)[0]
+    confidence = float(max(probabilities))
+
+    status = "Normal" if prediction == 1 else "Anomaly"
+    return {"status": status, "confidence": round(confidence, 4)}
+
+
+# ---------------------------------------------------------------------------
+# Step 7 — Save model artefacts
+# ---------------------------------------------------------------------------
+def save_artefacts(
+    model: RandomForestClassifier,
+    scaler: MinMaxScaler,
+    model_path: str,
+    scaler_path: str,
+) -> None:
+    """Persist the trained model and fitted scaler as .pkl files."""
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    joblib.dump(model, model_path)
+    joblib.dump(scaler, scaler_path)
+    print(f"Model saved -> {model_path}")
+    print(f"Scaler saved -> {scaler_path}")
+
+
+# ===========================================================================
+# Main — run this file directly to regenerate model + scaler .pkl files
+# ===========================================================================
 if __name__ == "__main__":
-    # Define file paths
-    dataset_path = "data/os_processes_data.csv"  # Path to your dataset
-    model_path = "models/anomaly_detection_model.pkl"
-    scaler_path = "models/scaler.pkl"
+    MODEL_PATH = "models/anomaly_detection_model.pkl"
+    SCALER_PATH = "models/scaler.pkl"
 
-    # Step 1: Load the dataset
-    df = load_data(dataset_path)
-    if df is None:
-        exit()
+    # Step 1: Generate dataset
+    df = generate_dataset(num_rows=5000, anomaly_ratio=0.3)
 
-    # Step 2: Preprocess the data
-    df, scaler = preprocess_data(df)
+    # Step 2: Preprocess
+    X, y, scaler = preprocess_data(df)
 
-    # Step 3: Inject synthetic anomalies
-    df = inject_anomalies(df)
+    # Step 3: Split
+    X_train, X_test, y_train, y_test = split_data(X, y)
 
-    # Step 4: Split the data
-    X_train, X_test, y_train, y_test = split_data(df)
+    # Step 4: Train
+    model = train_model(X_train, y_train)
 
-    # Step 5: Train the model
-    model = train_model(X_train)
-
-    # Step 6: Evaluate the model
+    # Step 5: Evaluate
     evaluate_model(model, X_test, y_test)
 
-    # Step 7: Save the model and scaler
-    save_model(model, scaler, model_path, scaler_path)
+    # Step 6: Demo prediction
+    demo = predict_with_confidence(model, scaler, cpu=92.0, memory=85.0, disk=95.0, process_count=400)
+    print(f"\nDemo prediction: {demo}")
+
+    # Step 7: Save
+    save_artefacts(model, scaler, MODEL_PATH, SCALER_PATH)

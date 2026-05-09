@@ -3,13 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vampire Dashboard</title>
+    <title>KronOS — Vampire Dashboard</title>
+    <meta name="description" content="AI-powered real-time OS process monitoring dashboard with anomaly detection">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <!-- Socket.IO client library -->
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 </head>
 <body>
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar" aria-label="Navigation Menu">
-        <h2>System Metrics</h2>
+        <h2>KronOS</h2>
         <nav>
             <ul>
                 <li>
@@ -18,17 +21,24 @@
                     </a>
                 </li>
                 <li>
-                    <a href="/processes" aria-label="View Live Processes">
-                        Live Process
+                    <a href="#" onclick="showSection('processes-section')" aria-label="View Live Processes">
+                        Live Processes
                     </a>
                 </li>
             </ul>
         </nav>
+        <!-- Connection status badge -->
+        <div id="connection-badge" class="connection-badge connected" aria-live="polite">
+            &#x25CF; Connected
+        </div>
     </aside>
 
     <!-- Main Content -->
     <main class="main-content" id="mainContent" aria-label="Main Dashboard Content">
+
+        <!-- ============================================================ -->
         <!-- Overview Section -->
+        <!-- ============================================================ -->
         <section id="overview" class="container section" aria-labelledby="overview-title">
             <h1 id="overview-title">System Overview</h1>
 
@@ -67,7 +77,8 @@
                 <!-- Status Indicator -->
                 <div class="status-container" aria-label="System Status">
                     <p><strong>Status:</strong></p>
-                    <span id="status" class="status-indicator" aria-live="polite">Fetching...</span>
+                    <span id="status" class="status-indicator" aria-live="polite">Connecting...</span>
+                    <p class="confidence-label" id="confidence-label">Confidence: —</p>
                 </div>
             </div>
 
@@ -75,18 +86,56 @@
             <section id="suggestions" aria-labelledby="suggestions-title">
                 <h2 id="suggestions-title">Suggestions</h2>
                 <ul id="suggestions-list" aria-label="System Optimization Suggestions">
-                    <li>Loading...</li>
+                    <li>Waiting for data...</li>
                 </ul>
             </section>
 
             <!-- Anomalies Section -->
             <section id="anomalies" aria-labelledby="anomalies-title">
                 <h2 id="anomalies-title">Anomalies</h2>
-                <p><strong>Status:</strong> <span id="anomaly-status" aria-live="polite">Fetching...</span></p>
+                <p><strong>Status:</strong> <span id="anomaly-status" aria-live="polite">Connecting...</span></p>
                 <ul id="anomalies-list" aria-label="Detected Anomalies">
-                    <li>Loading...</li>
+                    <li>Waiting for data...</li>
                 </ul>
             </section>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- Processes Section (client-rendered from /api/processes JSON)  -->
+        <!-- ============================================================ -->
+        <section id="processes-section" class="container section" style="display:none;" aria-labelledby="processes-title">
+            <h1 id="processes-title">Live Processes</h1>
+
+            <!-- Search + controls bar -->
+            <div class="process-controls">
+                <input type="text" id="process-search" placeholder="Search process name..." autocomplete="off" />
+                <select id="process-limit">
+                    <option value="25">Top 25</option>
+                    <option value="50" selected>Top 50</option>
+                    <option value="100">Top 100</option>
+                    <option value="200">Top 200</option>
+                </select>
+                <button id="process-refresh-btn" type="button">Refresh</button>
+            </div>
+
+            <!-- Process table -->
+            <div class="process-table-wrapper">
+                <table id="process-table">
+                    <thead>
+                        <tr>
+                            <th data-sort="pid">PID</th>
+                            <th data-sort="name">Name</th>
+                            <th data-sort="cpu_percent">CPU %</th>
+                            <th data-sort="memory_percent">Memory %</th>
+                            <th data-sort="status">Status</th>
+                            <th data-sort="username">User</th>
+                        </tr>
+                    </thead>
+                    <tbody id="process-tbody">
+                        <tr><td colspan="6" style="text-align:center;">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </section>
     </main>
 
